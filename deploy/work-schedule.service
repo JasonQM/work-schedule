@@ -1,0 +1,23 @@
+[Unit]
+Description=Work Schedule AI development workspace
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=work-schedule
+Group=work-schedule
+WorkingDirectory=/opt/work-schedule
+EnvironmentFile=/etc/work-schedule.env
+ExecStart=/opt/work-schedule/bin/work-schedule
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

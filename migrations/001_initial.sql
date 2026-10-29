@@ -1,0 +1,38 @@
+CREATE TABLE IF NOT EXISTS schema_migrations (version INT PRIMARY KEY, applied_at DATETIME(6) NOT NULL);
+CREATE TABLE IF NOT EXISTS workspace_revision (id INT PRIMARY KEY, revision BIGINT NOT NULL) ENGINE=InnoDB;
+INSERT IGNORE INTO workspace_revision(id,revision) VALUES(1,0);
+CREATE TABLE IF NOT EXISTS users (
+ id VARCHAR(36) PRIMARY KEY, email VARCHAR(190) NOT NULL UNIQUE, name VARCHAR(120) NOT NULL,
+ password_hash VARCHAR(255) NOT NULL, role VARCHAR(20) NOT NULL, created_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS credentials (
+ hash CHAR(64) PRIMARY KEY, user_id VARCHAR(36) NOT NULL, kind VARCHAR(20) NOT NULL,
+ name VARCHAR(120) NOT NULL, expires_at DATETIME(6) NOT NULL, created_at DATETIME(6) NOT NULL,
+ FOREIGN KEY (user_id) REFERENCES users(id), INDEX(user_id,kind)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS projects (
+ id VARCHAR(36) PRIMARY KEY, identity_key VARCHAR(255) NOT NULL UNIQUE,
+ name VARCHAR(160) NOT NULL, summary TEXT NOT NULL, repository VARCHAR(500) NOT NULL,
+ created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS items (
+ id VARCHAR(36) PRIMARY KEY, project_id VARCHAR(36) NOT NULL, external_key VARCHAR(160) NOT NULL,
+ kind VARCHAR(20) NOT NULL, title VARCHAR(200) NOT NULL, description TEXT NOT NULL,
+ status VARCHAR(30) NOT NULL, priority VARCHAR(10) NOT NULL, parent_id VARCHAR(36) NULL,
+ version INT NOT NULL, acceptance TEXT NOT NULL, evidence TEXT NOT NULL, next_step TEXT NOT NULL,
+ actor VARCHAR(120) NOT NULL, created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL,
+ UNIQUE(project_id,external_key), FOREIGN KEY(project_id) REFERENCES projects(id),
+ FOREIGN KEY(parent_id) REFERENCES items(id), INDEX(project_id,kind,status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS events (
+ sequence BIGINT AUTO_INCREMENT PRIMARY KEY, id VARCHAR(36) NOT NULL UNIQUE,
+ project_id VARCHAR(36) NOT NULL, item_id VARCHAR(36) NULL, actor VARCHAR(120) NOT NULL,
+ action VARCHAR(60) NOT NULL, summary VARCHAR(500) NOT NULL, payload JSON NOT NULL,
+ created_at DATETIME(6) NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id),
+ INDEX(project_id,sequence)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS requests (
+ user_id VARCHAR(36) NOT NULL, request_id VARCHAR(100) NOT NULL, fingerprint CHAR(64) NOT NULL,
+ response JSON NOT NULL, created_at DATETIME(6) NOT NULL,
+ PRIMARY KEY(user_id,request_id), FOREIGN KEY(user_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -1,0 +1,16 @@
+.DS_Store
+.workbuddy/
+.env
+.env.*
+!.env.example
+bin/
+web/node_modules/
+web/dist/
+*.log
+coverage.out
+web/*.tsbuildinfo
+output/
+.work-schedule-pending.json
+
+.pnpm-store/
+.playwright-cli/
