@@ -29,12 +29,19 @@ type Config struct {
 	Secure            bool
 }
 type App struct {
-	Store  *Store
-	Config Config
-	gate   *limiter
+	Store   *Store
+	Config  Config
+	gate    *limiter
+	updates *revisionHub
 }
 
-func NewApp(s *Store, c Config) *App { return &App{s, c, &limiter{entries: map[string]bucket{}}} }
+func NewApp(s *Store, c Config) *App {
+	return &App{Store: s, Config: c, gate: &limiter{entries: map[string]bucket{}}, updates: newRevisionHub(func(ctx context.Context) (int64, error) {
+		var revision int64
+		err := s.DB.QueryRowContext(ctx, "SELECT revision FROM workspace_revision WHERE id=1").Scan(&revision)
+		return revision, err
+	}, 5*time.Second)}
+}
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +54,16 @@ func (a *App) Handler() http.Handler {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("POST /api/login", a.login)
+	mux.Handle("GET /api/skill-package", a.auth(false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, err := skills.Archive()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="work-schedule-sync.zip"`)
+		w.Write(data)
+	})))
 	mux.Handle("GET /api/skill", a.auth(false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="SKILL.md"`)
@@ -93,6 +110,23 @@ func (a *App) Handler() http.Handler {
 	mux.Handle("DELETE /api/tokens/{id}", a.auth(false, http.HandlerFunc(a.deleteToken)))
 	mux.Handle("GET /api/members", a.auth(false, http.HandlerFunc(a.members)))
 	mux.Handle("POST /api/members", a.auth(false, http.HandlerFunc(a.createMember)))
+	mux.Handle("POST /api/agent/sync", a.auth(true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in BatchInput
+		if !decode(w, r, &in) {
+			return
+		}
+		out, err := a.Store.SyncBatch(r.Context(), actor(r.Context()), in)
+		if err != nil {
+			code := 503
+			var e *AppError
+			if errors.As(err, &e) {
+				code = e.Code
+			}
+			writeJSON(w, code, map[string]any{"error": syncError(err)})
+			return
+		}
+		writeJSON(w, 200, out)
+	})))
 	mux.Handle("/mcp", a.auth(true, a.mcpHandler()))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -229,13 +263,28 @@ func (a *App) security(next http.Handler) http.Handler {
 			writeError(w, fail(429, "请求过于频繁，请稍后重试"))
 			return
 		}
+		short := r.URL.Path == "/mcp" || r.URL.Path == "/api/agent/sync"
 		if r.URL.Path != "/api/events" {
-			ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+			budget := 20 * time.Second
+			if short {
+				budget = 3 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), budget)
 			defer cancel()
 			r = r.WithContext(ctx)
 		}
+		if short {
+			controller := http.NewResponseController(w)
+			_ = controller.SetReadDeadline(time.Now().Add(3 * time.Second))
+			_ = controller.SetWriteDeadline(time.Now().Add(4 * time.Second))
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
 		defer r.Body.Close()
+		if short {
+			w.Header().Set("Content-Type", "application/json")
+			http.TimeoutHandler(next, 3*time.Second, `{"error":{"code":"timeout","message":"同步超时，暂存后继续开发","retryable":true,"action":"save_pending_continue"}}`).ServeHTTP(w, r)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -268,20 +317,25 @@ func (a *App) stream(w http.ResponseWriter, r *http.Request) {
 	_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	fmt.Fprint(w, ": connected\n\n")
 	f.Flush()
-	// Bounded per-browser polling is sufficient for the initial small-team deployment.
+	updates, unsubscribe := a.updates.subscribe()
+	defer unsubscribe()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	ttl := time.NewTimer(30 * time.Minute)
 	defer ttl.Stop()
-	var last int64 = -1
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-ttl.C:
 			return
-		case <-ticker.C:
+		case revision := <-updates:
 			_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if _, err := fmt.Fprintf(w, "event: change\ndata: %d\n\n", revision); err != nil {
+				return
+			}
+			f.Flush()
+		case <-ticker.C:
 			c, err := r.Cookie("ws_session")
 			if err != nil {
 				return
@@ -289,22 +343,15 @@ func (a *App) stream(w http.ResponseWriter, r *http.Request) {
 			if _, err = a.Store.Authenticate(r.Context(), c.Value, "session"); err != nil {
 				return
 			}
-			var n int64
-			if err = a.Store.DB.QueryRowContext(r.Context(), "SELECT revision FROM workspace_revision WHERE id=1").Scan(&n); err != nil {
+			_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if _, err = fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
 				return
-			}
-			if n != last {
-				if _, err = fmt.Fprintf(w, "event: change\ndata: %d\n\n", n); err != nil {
-					return
-				}
-				last = n
-			} else {
-				fmt.Fprint(w, ": heartbeat\n\n")
 			}
 			f.Flush()
 		}
 	}
 }
+
 func (a *App) tokens(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.Store.DB.QueryContext(r.Context(), "SELECT hash,name,expires_at FROM credentials WHERE user_id=? AND kind='api' ORDER BY created_at DESC", actor(r.Context()).ID)
 	if err != nil {

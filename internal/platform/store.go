@@ -225,25 +225,24 @@ func (s *Store) mutate(ctx context.Context, u User, requestID string, input any,
 		return nil, err
 	}
 	defer tx.Rollback()
-	// Per-user lock serializes idempotency checks across this user's concurrent sessions.
-	var uid string
-	if err = tx.QueryRowContext(ctx, "SELECT id FROM users WHERE id=? FOR UPDATE", u.ID).Scan(&uid); err != nil {
+	// Reserve only this idempotency key; independent projects/users no longer queue on a user row.
+	fp := fingerprint(input)
+	_, err = tx.ExecContext(ctx, "INSERT INTO requests(user_id,request_id,fingerprint,response,created_at) VALUES(?,?,?,'null',UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE request_id=VALUES(request_id)", u.ID, requestID, fp)
+	if err != nil {
 		return nil, err
 	}
 	var oldFP string
 	var result []byte
-	fp := fingerprint(input)
-	err = tx.QueryRowContext(ctx, "SELECT fingerprint,response FROM requests WHERE user_id=? AND request_id=?", u.ID, requestID).Scan(&oldFP, &result)
-	if err == nil {
-		if oldFP != fp {
-			return nil, fail(409, "request_id 已用于不同操作，请使用新的请求 ID")
-		}
+	if err = tx.QueryRowContext(ctx, "SELECT fingerprint,response FROM requests WHERE user_id=? AND request_id=? FOR UPDATE", u.ID, requestID).Scan(&oldFP, &result); err != nil {
+		return nil, err
+	}
+	if oldFP != fp {
+		return nil, fail(409, "request_id 已用于不同操作，请使用新的请求 ID")
+	}
+	if string(result) != "null" {
 		var out any
 		err = json.Unmarshal(result, &out)
 		return out, err
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
 	}
 	out, err := fn(tx)
 	if err != nil {
@@ -253,7 +252,7 @@ func (s *Store) mutate(ctx context.Context, u User, requestID string, input any,
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.ExecContext(ctx, "INSERT INTO requests(user_id,request_id,fingerprint,response,created_at) VALUES(?,?,?,?,UTC_TIMESTAMP(6))", u.ID, requestID, fp, string(result))
+	_, err = tx.ExecContext(ctx, "UPDATE requests SET response=? WHERE user_id=? AND request_id=?", string(result), u.ID, requestID)
 	if err != nil {
 		return nil, err
 	}
@@ -302,88 +301,99 @@ func (s *Store) PutItem(ctx context.Context, u User, in ItemInput) (any, error) 
 	if err := in.Validate(u); err != nil {
 		return nil, err
 	}
-	return s.mutate(ctx, u, in.RequestID, in, func(tx *sql.Tx) (any, error) {
+	return s.mutate(ctx, u, in.RequestID, in, func(tx *sql.Tx) (any, error) { return s.putItemTx(ctx, tx, u, in, false) })
+}
+func (s *Store) putItemTx(ctx context.Context, tx *sql.Tx, u User, in ItemInput, projectLocked bool) (any, error) {
+	if !projectLocked {
 		var project string
 		if err := tx.QueryRowContext(ctx, "SELECT id FROM projects WHERE id=? FOR UPDATE", in.ProjectID).Scan(&project); errors.Is(err, sql.ErrNoRows) {
 			return nil, fail(404, "项目不存在")
 		} else if err != nil {
 			return nil, err
 		}
-		if in.ParentID != "" {
-			var kind string
-			err := tx.QueryRowContext(ctx, "SELECT kind FROM items WHERE id=? AND project_id=?", in.ParentID, in.ProjectID).Scan(&kind)
-			if errors.Is(err, sql.ErrNoRows) || err == nil && kind != "requirement" {
-				return nil, fail(400, "父项必须是当前项目的需求")
-			}
-			if err != nil {
-				return nil, err
-			}
-		}
-		var old Item
-		err := scanItem(tx.QueryRowContext(ctx, "SELECT id,project_id,external_key,kind,title,description,status,priority,COALESCE(parent_id,''),version,acceptance,evidence,next_step,actor,created_at,updated_at FROM items WHERE project_id=? AND external_key=? FOR UPDATE", in.ProjectID, in.ExternalKey), &old)
-		exists := err == nil
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
-		}
-		if !exists && (in.ID != "" || in.ExpectedVersion != 0) {
-			return nil, fail(409, "记录不存在，请重新读取项目")
-		}
-		if (in.Status == "accepted" || in.Status == "rejected") && (!exists || old.Status != "pending_acceptance") {
-			return nil, fail(409, "只能对待验收记录作出验收决定")
-		}
-		now := time.Now().UTC()
-		i := Item{newID(), in.ProjectID, in.ExternalKey, in.Kind, in.Title, in.Description, in.Status, in.Priority, in.ParentID, 1, in.Acceptance, in.Evidence, in.NextStep, u.Name, now, now}
-		action := "item.created"
-		if exists {
-			if in.ID != old.ID || in.ExpectedVersion != old.Version {
-				return nil, fail(409, "版本冲突，请读取最新记录，合并后使用新的 request_id 重试")
-			}
-			if old.Kind != in.Kind || old.ParentID != in.ParentID {
-				return nil, fail(400, "已有记录不能更改类型或父需求")
-			}
-			i.ID = old.ID
-			i.Version = old.Version + 1
-			i.CreatedAt = old.CreatedAt
-			action = "item.updated"
-			// Semantic requirement changes invalidate prior acceptance and all dependent task evidence.
-			if i.Kind == "requirement" && (i.Title != old.Title || i.Description != old.Description || i.Acceptance != old.Acceptance) {
-				i.Status = "needs_review"
-				i.Evidence = ""
-				action = "requirement.changed"
-				_, err = tx.ExecContext(ctx, "UPDATE items SET status='needs_review',evidence='',version=version+1,updated_at=?,actor=? WHERE parent_id=? AND status<>'cancelled'", now, u.Name, i.ID)
-				if err != nil {
-					return nil, err
-				}
-			}
-			if i.Status == "accepted" && i.Kind == "requirement" {
-				var remaining int
-				err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM items WHERE parent_id=? AND status NOT IN ('accepted','cancelled')", i.ID).Scan(&remaining)
-				if err != nil {
-					return nil, err
-				}
-				if remaining > 0 {
-					return nil, fail(409, "仍有未验收的开发子任务，不能通过需求验收")
-				}
-			}
-			_, err = tx.ExecContext(ctx, "UPDATE items SET title=?,description=?,status=?,priority=?,version=?,acceptance=?,evidence=?,next_step=?,actor=?,updated_at=? WHERE id=?", i.Title, i.Description, i.Status, i.Priority, i.Version, i.Acceptance, i.Evidence, i.NextStep, i.Actor, now, i.ID)
-		} else {
-			_, err = tx.ExecContext(ctx, "INSERT INTO items(id,project_id,external_key,kind,title,description,status,priority,parent_id,version,acceptance,evidence,next_step,actor,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,NULLIF(?,''),?,?,?,?,?,?,?)", i.ID, i.ProjectID, i.ExternalKey, i.Kind, i.Title, i.Description, i.Status, i.Priority, i.ParentID, i.Version, i.Acceptance, i.Evidence, i.NextStep, i.Actor, i.CreatedAt, i.UpdatedAt)
+	}
+
+	if in.ParentID != "" {
+		var kind string
+		err := tx.QueryRowContext(ctx, "SELECT kind FROM items WHERE id=? AND project_id=?", in.ParentID, in.ProjectID).Scan(&kind)
+		if errors.Is(err, sql.ErrNoRows) || err == nil && kind != "requirement" {
+			return nil, fail(400, "父项必须是当前项目的需求")
 		}
 		if err != nil {
 			return nil, err
 		}
-		if i.Kind == "task" && i.Status != "accepted" && i.Status != "cancelled" {
-			_, err = tx.ExecContext(ctx, "UPDATE items SET status='needs_review',evidence='',version=version+1,updated_at=?,actor=? WHERE id=? AND status='accepted'", now, u.Name, i.ParentID)
+	}
+	var old Item
+	err := scanItem(tx.QueryRowContext(ctx, "SELECT id,project_id,external_key,kind,title,description,status,priority,COALESCE(parent_id,''),version,acceptance,evidence,next_step,actor,created_at,updated_at FROM items WHERE project_id=? AND external_key=? FOR UPDATE", in.ProjectID, in.ExternalKey), &old)
+	exists := err == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if !exists && (in.ID != "" || in.ExpectedVersion != 0) {
+		return nil, fail(409, "记录不存在，请重新读取项目")
+	}
+	if (in.Status == "accepted" || in.Status == "rejected") && (!exists || old.Status != "pending_acceptance") {
+		return nil, fail(409, "只能对待验收记录作出验收决定")
+	}
+	now := time.Now().UTC()
+	i := Item{newID(), in.ProjectID, in.ExternalKey, in.Kind, in.Title, in.Description, in.Status, in.Priority, in.ParentID, 1, in.Acceptance, in.Evidence, in.NextStep, u.Name, now, now}
+	action := "item.created"
+	if exists {
+		if in.ID != old.ID || in.ExpectedVersion != old.Version {
+			return nil, fail(409, "版本冲突，请读取最新记录，合并后使用新的 request_id 重试")
+		}
+		if old.Kind != in.Kind || old.ParentID != in.ParentID {
+			return nil, fail(400, "已有记录不能更改类型或父需求")
+		}
+		if !projectLocked && !in.AllowClear && legacyWouldClear(old, in) {
+			return nil, fail(400, "旧完整更新将清空已有说明，请读取详情；有意清空请用批量局部更新或 allow_clear=true")
+		}
+		if sameItem(old, in) {
+			return old, nil
+		}
+
+		i.ID = old.ID
+		i.Version = old.Version + 1
+		i.CreatedAt = old.CreatedAt
+		action = "item.updated"
+		// Semantic requirement changes invalidate prior acceptance and all dependent task evidence.
+		if i.Kind == "requirement" && (i.Title != old.Title || i.Description != old.Description || i.Acceptance != old.Acceptance) {
+			i.Status = "needs_review"
+			i.Evidence = ""
+			action = "requirement.changed"
+			_, err = tx.ExecContext(ctx, "UPDATE items SET status='needs_review',evidence='',version=version+1,updated_at=?,actor=? WHERE parent_id=? AND status<>'cancelled'", now, u.Name, i.ID)
 			if err != nil {
 				return nil, err
 			}
 		}
-		if _, err = tx.ExecContext(ctx, "UPDATE projects SET updated_at=? WHERE id=?", now, i.ProjectID); err != nil {
+		if i.Status == "accepted" && i.Kind == "requirement" {
+			var remaining int
+			err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM items WHERE parent_id=? AND status NOT IN ('accepted','cancelled')", i.ID).Scan(&remaining)
+			if err != nil {
+				return nil, err
+			}
+			if remaining > 0 {
+				return nil, fail(409, "仍有未验收的开发子任务，不能通过需求验收")
+			}
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE items SET title=?,description=?,status=?,priority=?,version=?,acceptance=?,evidence=?,next_step=?,actor=?,updated_at=? WHERE id=?", i.Title, i.Description, i.Status, i.Priority, i.Version, i.Acceptance, i.Evidence, i.NextStep, i.Actor, now, i.ID)
+	} else {
+		_, err = tx.ExecContext(ctx, "INSERT INTO items(id,project_id,external_key,kind,title,description,status,priority,parent_id,version,acceptance,evidence,next_step,actor,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,NULLIF(?,''),?,?,?,?,?,?,?)", i.ID, i.ProjectID, i.ExternalKey, i.Kind, i.Title, i.Description, i.Status, i.Priority, i.ParentID, i.Version, i.Acceptance, i.Evidence, i.NextStep, i.Actor, i.CreatedAt, i.UpdatedAt)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if i.Kind == "task" && i.Status != "accepted" && i.Status != "cancelled" {
+		_, err = tx.ExecContext(ctx, "UPDATE items SET status='needs_review',evidence='',version=version+1,updated_at=?,actor=? WHERE id=? AND status='accepted'", now, u.Name, i.ParentID)
+		if err != nil {
 			return nil, err
 		}
-		err = event(ctx, tx, u, i.ProjectID, i.ID, action, i.Title, map[string]any{"before": old, "after": i})
-		return i, err
-	})
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE projects SET updated_at=? WHERE id=?", now, i.ProjectID); err != nil {
+		return nil, err
+	}
+	err = event(ctx, tx, u, i.ProjectID, i.ID, action, i.Title, map[string]any{"before": old, "after": i})
+	return i, err
 }
 
 func (s *Store) ChangePassword(ctx context.Context, u User, current, next, currentSession string) error {

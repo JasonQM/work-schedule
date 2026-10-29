@@ -14,3 +14,6 @@ output/
 
 .pnpm-store/
 .playwright-cli/
+
+__pycache__/
+*.pyc

@@ -67,6 +67,7 @@ type ProjectInput struct {
 	Repository  string `json:"repository"`
 }
 type ItemInput struct {
+	AllowClear      bool   `json:"allow_clear,omitempty"`
 	RequestID       string `json:"request_id"`
 	ProjectID       string `json:"project_id"`
 	ID              string `json:"id,omitempty"`

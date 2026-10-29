@@ -29,8 +29,8 @@ func TestMCPDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 3 {
-		t.Fatalf("expected 3 tools, got %d", len(tools.Tools))
+	if len(tools.Tools) != 4 {
+		t.Fatalf("expected 4 tools, got %d", len(tools.Tools))
 	}
 	// Validate a malformed request at the actual protocol boundary without touching storage.
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "sync_work_item", Arguments: map[string]any{"project_id": "missing"}})
@@ -43,7 +43,7 @@ func TestMySQLWorkflow(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set TEST_MYSQL_DSN to a dedicated MySQL test database")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	s, err := Open(ctx, dsn)
 	if err != nil {
@@ -203,6 +203,7 @@ func TestMySQLWorkflow(t *testing.T) {
 	if err != nil || !res.IsError {
 		t.Fatal("admin API credential bypassed acceptance boundary", err)
 	}
+	checkOptimizedStore(t, ctx, s, u, p.ID)
 	if err = s.ChangePassword(ctx, User{ID: u.ID}, "test-password-12345", "changed-test-password-123", sessionToken); err != nil {
 		t.Fatal(err)
 	}

@@ -28,6 +28,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - run: python3 -m unittest discover -s tests -v
       - run: go vet ./...
       - run: go test -race -count=1 ./...
       - run: CGO_ENABLED=0 go build ./cmd/server

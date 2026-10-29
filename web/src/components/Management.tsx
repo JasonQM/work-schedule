@@ -433,11 +433,11 @@ export function Integrations({ onError }: { onError: (s: string) => void }) {
           </div>
           <a
             className="secondary skill-download"
-            href="/api/skill"
-            download="SKILL.md"
+            href="/api/skill-package"
+            download="work-schedule-sync.zip"
           >
             <FileText size={15} />
-            下载同步 Skill
+            下载完整 Skill 包
           </a>
           <p className="footnote">
             连接提供调用能力，Skill 规定何时同步。仅连接 MCP 并不保证 AI
