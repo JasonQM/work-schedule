@@ -21,6 +21,7 @@ export function summarizeTasks(items: Item[]) {
   const accepted = tasks.filter((i) => i.status === "accepted").length;
   return {
     total: tasks.length,
+    todo: tasks.filter((i) => i.status === "todo").length,
     submitted,
     accepted,
     developing: tasks.filter((i) => i.status === "in_progress").length,
@@ -29,6 +30,8 @@ export function summarizeTasks(items: Item[]) {
     blocked: tasks.filter((i) => i.status === "blocked").length,
     review: tasks.filter((i) => ["needs_review", "rejected"].includes(i.status))
       .length,
+    needsReview: tasks.filter((i) => i.status === "needs_review").length,
+    rejected: tasks.filter((i) => i.status === "rejected").length,
     submittedPercent: tasks.length
       ? Math.round((submitted / tasks.length) * 100)
       : 0,

@@ -44,8 +44,36 @@ test("需求变更和验收返工需要重新开发复核", () => {
   assert.equal(s.submitted, 0);
   assert.equal(s.accepted, 0);
   assert.equal(s.review, 2);
+  assert.equal(s.needsReview, 1);
+  assert.equal(s.rejected, 1);
   assert.equal(s.blocked, 1);
   assert.equal(deliveryStage("needs_review"), 1);
   assert.equal(deliveryStage("rejected"), 1);
   assert.equal(deliveryStage("blocked"), 1);
+});
+test("阶段统计覆盖所有未取消的开发单元，局部开发不虚报已提交", () => {
+  const s = summarizeTasks([
+    item("todo"),
+    item("in_progress"),
+    item("pending_verification"),
+    item("pending_acceptance"),
+    item("accepted"),
+    item("blocked"),
+    item("needs_review"),
+    item("rejected"),
+    item("cancelled"),
+  ]);
+  assert.equal(
+    s.todo +
+      s.developing +
+      s.verifying +
+      s.pending +
+      s.accepted +
+      s.blocked +
+      s.needsReview +
+      s.rejected,
+    s.total,
+  );
+  assert.equal(s.submitted, 3);
+  assert.equal(s.total, 8);
 });

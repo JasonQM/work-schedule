@@ -2170,6 +2170,31 @@ pre {
 .compact-summary > div > span {
   font-size: 12px;
 }
+.delivery-summary > .delivery-states {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.delivery-summary > .delivery-states > span {
+  display: inline-flex;
+  gap: 5px;
+  padding: 4px 7px;
+  border-radius: 5px;
+  background: var(--surface-soft);
+  font-size: 12px;
+}
+.delivery-summary > .delivery-states > .review-state {
+  color: #92400e;
+  background: #fef3c7;
+}
+.delivery-review-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
 .requirement-card-bottom {
   display: flex;
   gap: 10px;

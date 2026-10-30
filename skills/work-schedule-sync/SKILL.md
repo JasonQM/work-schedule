@@ -22,6 +22,8 @@ description: 在已连接 Work Schedule 的 AI 开发中，以概要读取、批
 - 更新只传变化字段及已知 expected_version；未传字段保留，空字符串表示清空。每批 external_key 不重复。没有变化不发送，刚返回的版本可继续复用，不强制再次读取。
 - 开始一个有意义单元、需求范围变化、阻塞、验证结束和交付时同步。相邻变化合并，不上报读文件、每次编辑、每条命令。短任务合并到一个完成节点，优先使用批量接口。
 - 需求变化后关联单元会进入 needs_review，旧验证依据失效。不要恢复旧验收结果。AI 不能设置 accepted；正式验收由管理员确认。
+- 日常进展更新子任务的 status、evidence、next_step；仅改说明文字不会推进阶段。大需求的 title/description/acceptance 是范围与验收约定，修改会触发全部关联单元复核，不要为了汇总进度反复改写它们，模块进度由面板根据子任务计算。
+- 需求变更后，在继续相关单元时核对当前范围：未开始设 todo，已有局部实现且仍在开发设 in_progress，完整提交后按实际验证阶段设 pending_verification 或 pending_acceptance；有阻塞设 blocked 并写 next_step。重新记录适用于新需求的验证依据，无法确认的单元保留 needs_review。不能只追加说明而让已核对的单元一直停留在 needs_review，也不能批量恢复旧验收状态。
 - pending_verification 表示尚未完成验证；pending_acceptance 必须有实际 evidence。失败、未执行或无法验证要明确记录。blocked 必须 next_step，说明原因和下一步。不上传思维过程、源码、完整对话、密钥或未脱敏日志。
 
 ## 失败即降级
